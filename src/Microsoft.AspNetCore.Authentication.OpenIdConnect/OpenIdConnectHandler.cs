@@ -66,102 +66,108 @@ namespace Microsoft.AspNetCore.Authentication.OpenIdConnect
         /// Handles Signout
         /// </summary>
         /// <returns></returns>
-        protected override async Task HandleSignOutAsync(SignOutContext signout)
+        protected override async Task HandleSignOutAsync(SignOutContext context)
         {
-            if (signout != null)
+            if (context == null)
             {
-                if (_configuration == null && Options.ConfigurationManager != null)
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            Logger.EnteringOpenIdAuthenticationHandlerHandleSignOutAsync(GetType().FullName);
+
+            if (_configuration == null && Options.ConfigurationManager != null)
+            {
+                _configuration = await Options.ConfigurationManager.GetConfigurationAsync(Context.RequestAborted);
+            }
+
+            var properties = new AuthenticationProperties(context.Properties);
+            if (string.IsNullOrEmpty(properties.RedirectUri))
+            {
+                properties.RedirectUri = CurrentUri;
+            }
+            Logger.PostSignOutRedirect(properties.RedirectUri);
+
+            var message = new OpenIdConnectMessage()
+            {
+                IssuerAddress = _configuration == null ? string.Empty : (_configuration.EndSessionEndpoint ?? string.Empty),
+            };
+
+            if (!string.IsNullOrEmpty(Options.PostLogoutRedirectUri) && Options.PostLogoutRedirectUri.StartsWith("/", StringComparison.Ordinal))
+            {
+                message.PostLogoutRedirectUri = BuildRedirectUri(Options.PostLogoutRedirectUri);
+            }
+            else
+            {
+                message.PostLogoutRedirectUri = Options.PostLogoutRedirectUri;
+            }
+
+            message.IdTokenHint = await Context.Authentication.GetTokenAsync(OpenIdConnectParameterNames.IdToken);
+            var redirectContext = new RedirectContext(Context, Options, properties)
+            {
+                ProtocolMessage = message
+            };
+
+            await Options.Events.RedirectToIdentityProviderForSignOut(redirectContext);
+            if (redirectContext.HandledResponse)
+            {
+                Logger.RedirectToIdentityProviderForSignOutHandledResponse();
+                return;
+            }
+            else if (redirectContext.Skipped)
+            {
+                Logger.RedirectToIdentityProviderForSignOutSkipped();
+                return;
+            }
+
+            message = redirectContext.ProtocolMessage;
+
+            if (!string.IsNullOrEmpty(message.State))
+            {
+                properties.Items[OpenIdConnectDefaults.UserstatePropertiesKey] = message.State;
+            }
+
+            message.State = Options.StateDataFormat.Protect(properties);
+
+            if (Options.AuthenticationMethod == OpenIdConnectRedirectBehavior.RedirectGet)
+            {
+                var redirectUri = message.CreateLogoutRequestUrl();
+                if (!Uri.IsWellFormedUriString(redirectUri, UriKind.Absolute))
                 {
-                    _configuration = await Options.ConfigurationManager.GetConfigurationAsync(Context.RequestAborted);
+                    Logger.InvalidLogoutQueryStringRedirectUrl(redirectUri);
                 }
 
-                var message = new OpenIdConnectMessage()
+                Response.Redirect(redirectUri);
+            }
+            else if (Options.AuthenticationMethod == OpenIdConnectRedirectBehavior.FormPost)
+            {
+                var inputs = new StringBuilder();
+                foreach (var parameter in message.Parameters)
                 {
-                    IssuerAddress = _configuration == null ? string.Empty : (_configuration.EndSessionEndpoint ?? string.Empty),
-                };
+                    var name = HtmlEncoder.Encode(parameter.Key);
+                    var value = HtmlEncoder.Encode(parameter.Value);
 
-                // Set End_Session_Endpoint in order:
-                // 1. properties.Redirect
-                // 2. Options.PostLogoutRedirectUri
-                var properties = new AuthenticationProperties(signout.Properties);
-                var logoutRedirectUri = properties.RedirectUri;
-                if (!string.IsNullOrEmpty(logoutRedirectUri))
-                {
-                    // Relative to PathBase
-                    if (logoutRedirectUri.StartsWith("/", StringComparison.Ordinal))
-                    {
-                        logoutRedirectUri = BuildRedirectUri(logoutRedirectUri);
-                    }
-                    message.PostLogoutRedirectUri = logoutRedirectUri;
-                }
-                else if (!string.IsNullOrEmpty(Options.PostLogoutRedirectUri))
-                {
-                    logoutRedirectUri = Options.PostLogoutRedirectUri;
-                    // Relative to PathBase
-                    if (logoutRedirectUri.StartsWith("/", StringComparison.Ordinal))
-                    {
-                        logoutRedirectUri = BuildRedirectUri(logoutRedirectUri);
-                    }
-                    message.PostLogoutRedirectUri = logoutRedirectUri;
+                    var input = string.Format(CultureInfo.InvariantCulture, InputTagFormat, name, value);
+                    inputs.AppendLine(input);
                 }
 
-                message.IdTokenHint = await Context.Authentication.GetTokenAsync(OpenIdConnectParameterNames.IdToken);
-                var redirectContext = new RedirectContext(Context, Options, properties)
-                {
-                    ProtocolMessage = message
-                };
+                var issuer = HtmlEncoder.Encode(message.IssuerAddress);
 
-                await Options.Events.RedirectToIdentityProviderForSignOut(redirectContext);
-                if (redirectContext.HandledResponse)
-                {
-                    Logger.RedirectToIdentityProviderForSignOutHandledResponse();
-                    return;
-                }
-                else if (redirectContext.Skipped)
-                {
-                    Logger.RedirectToIdentityProviderForSignOutSkipped();
-                    return;
-                }
+                var content = string.Format(CultureInfo.InvariantCulture, HtmlFormFormat, issuer, inputs);
+                var buffer = Encoding.UTF8.GetBytes(content);
 
-                message = redirectContext.ProtocolMessage;
+                Response.ContentLength = buffer.Length;
+                Response.ContentType = "text/html;charset=UTF-8";
 
-                if (Options.AuthenticationMethod == OpenIdConnectRedirectBehavior.RedirectGet)
-                {
-                    var redirectUri = message.CreateLogoutRequestUrl();
-                    if (!Uri.IsWellFormedUriString(redirectUri, UriKind.Absolute))
-                    {
-                        Logger.InvalidLogoutQueryStringRedirectUrl(redirectUri);
-                    }
+                // Emit Cache-Control=no-cache to prevent client caching.
+                Response.Headers[HeaderNames.CacheControl] = "no-cache";
+                Response.Headers[HeaderNames.Pragma] = "no-cache";
+                Response.Headers[HeaderNames.Expires] = "-1";
 
-                    Response.Redirect(redirectUri);
-                }
-                else if (Options.AuthenticationMethod == OpenIdConnectRedirectBehavior.FormPost)
-                {
-                    var inputs = new StringBuilder();
-                    foreach (var parameter in message.Parameters)
-                    {
-                        var name = HtmlEncoder.Encode(parameter.Key);
-                        var value = HtmlEncoder.Encode(parameter.Value);
-
-                        var input = string.Format(CultureInfo.InvariantCulture, InputTagFormat, name, value);
-                        inputs.AppendLine(input);
-                    }
-
-                    var issuer = HtmlEncoder.Encode(message.IssuerAddress);
-
-                    var content = string.Format(CultureInfo.InvariantCulture, HtmlFormFormat, issuer, inputs);
-                    var buffer = Encoding.UTF8.GetBytes(content);
-
-                    Response.ContentLength = buffer.Length;
-                    Response.ContentType = "text/html;charset=UTF-8";
-
-                    // Emit Cache-Control=no-cache to prevent client caching.
-                    Response.Headers[HeaderNames.CacheControl] = "no-cache";
-                    Response.Headers[HeaderNames.Pragma] = "no-cache";
-                    Response.Headers[HeaderNames.Expires] = "-1";
-
-                    await Response.Body.WriteAsync(buffer, 0, buffer.Length);
-                }
+                await Response.Body.WriteAsync(buffer, 0, buffer.Length);
+            }
+            else
+            {
+                throw new NotImplementedException($"An unsupported authentication method has been configured: {Options.AuthenticationMethod}");
             }
         }
 
@@ -178,6 +184,11 @@ namespace Microsoft.AspNetCore.Authentication.OpenIdConnect
 
             Logger.EnteringOpenIdAuthenticationHandlerHandleUnauthorizedAsync(GetType().FullName);
 
+            if (_configuration == null && Options.ConfigurationManager != null)
+            {
+                _configuration = await Options.ConfigurationManager.GetConfigurationAsync(Context.RequestAborted);
+            }
+
             // order for local RedirectUri
             // 1. challenge.Properties.RedirectUri
             // 2. CurrentUri if RedirectUri is not set)
@@ -191,11 +202,6 @@ namespace Microsoft.AspNetCore.Authentication.OpenIdConnect
                 properties.RedirectUri = CurrentUri;
             }
             Logger.PostAuthenticationLocalRedirect(properties.RedirectUri);
-
-            if (_configuration == null && Options.ConfigurationManager != null)
-            {
-                _configuration = await Options.ConfigurationManager.GetConfigurationAsync(Context.RequestAborted);
-            }
 
             var message = new OpenIdConnectMessage
             {
@@ -262,7 +268,6 @@ namespace Microsoft.AspNetCore.Authentication.OpenIdConnect
                 }
 
                 Response.Redirect(redirectUri);
-                return true;
             }
             else if (Options.AuthenticationMethod == OpenIdConnectRedirectBehavior.FormPost)
             {
@@ -290,10 +295,13 @@ namespace Microsoft.AspNetCore.Authentication.OpenIdConnect
                 Response.Headers[HeaderNames.Expires] = "-1";
 
                 await Response.Body.WriteAsync(buffer, 0, buffer.Length);
-                return true;
+            }
+            else
+            {
+                throw new NotImplementedException($"An unsupported authentication method has been configured: {Options.AuthenticationMethod}");
             }
 
-            throw new NotImplementedException($"An unsupported authentication method has been configured: {Options.AuthenticationMethod}");
+            return true;
         }
 
         /// <summary>
@@ -391,6 +399,8 @@ namespace Microsoft.AspNetCore.Authentication.OpenIdConnect
                     }
                     return AuthenticateResult.Fail(Resources.MessageStateIsInvalid);
                 }
+
+                // TODO: Check if this is a sign-out callback and we're supposed to do a redirect to a final destination.
 
                 string userstate = null;
                 properties.Items.TryGetValue(OpenIdConnectDefaults.UserstatePropertiesKey, out userstate);

@@ -50,6 +50,7 @@ namespace Microsoft.AspNetCore.Builder
             AutomaticChallenge = true;
             DisplayName = OpenIdConnectDefaults.Caption;
             CallbackPath = new PathString("/signin-oidc");
+            PostLogoutRedirectUri = CallbackPath;
             Events = new OpenIdConnectEvents();
             Scope.Add("openid");
             Scope.Add("profile");

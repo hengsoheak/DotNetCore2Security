@@ -64,6 +64,13 @@ namespace OpenIdConnectSample
                 ClientId = Configuration["oidc:clientid"],
                 ClientSecret = Configuration["oidc:clientsecret"], // for code flow
                 Authority = Configuration["oidc:authority"],
+                /*
+                // https://developers.google.com/identity/protocols/OpenIDConnect
+                ClientId = Configuration["google:clientid"],
+                ClientSecret = Configuration["google:clientsecret"], // for code flow
+                Authority = Configuration["google:authority"],
+                // Google only appears to work with OpenIdConnectResponseTypes.Code
+                */
                 ResponseType = OpenIdConnectResponseTypes.Code,
                 GetClaimsFromUserInfoEndpoint = true
             });
@@ -74,7 +81,23 @@ namespace OpenIdConnectSample
                 {
                     await context.Authentication.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
                     context.Response.ContentType = "text/html";
-                    await context.Response.WriteAsync($"<html><body>Signing out {context.User.Identity.Name}<br>{Environment.NewLine}");
+                    await context.Response.WriteAsync($"<html><body>Signed out {context.User.Identity.Name}<br>{Environment.NewLine}");
+                    await context.Response.WriteAsync("<a href=\"/\">Sign In</a>");
+                    await context.Response.WriteAsync($"</body></html>");
+                    return;
+                }
+
+                if (context.Request.Path.Equals("/remotesignout"))
+                {
+                    await context.Authentication.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+                    await context.Authentication.SignOutAsync(OpenIdConnectDefaults.AuthenticationScheme, new AuthenticationProperties() { RedirectUri = "/signedout" }); // Redirects
+                    return;
+                }
+
+                if (context.Request.Path.Equals("/signedout"))
+                {
+                    context.Response.ContentType = "text/html";
+                    await context.Response.WriteAsync($"<html><body>Signed out<br>");
                     await context.Response.WriteAsync("<a href=\"/\">Sign In</a>");
                     await context.Response.WriteAsync($"</body></html>");
                     return;
@@ -92,7 +115,8 @@ namespace OpenIdConnectSample
                 {
                     await context.Response.WriteAsync($"{claim.Type}: {claim.Value}<br>{Environment.NewLine}");
                 }
-                await context.Response.WriteAsync("<a href=\"/signout\">Sign Out</a>");
+                await context.Response.WriteAsync("<a href=\"/signout\">Sign Out</a><br>");
+                await context.Response.WriteAsync("<a href=\"/remotesignout\">Remote Sign Out</a><br>");
                 await context.Response.WriteAsync($"</body></html>");
             });
         }
